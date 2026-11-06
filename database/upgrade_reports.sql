@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS event_reports (
+    reportID INT AUTO_INCREMENT PRIMARY KEY,
+    eventID INT NULL,
+    submittedBy INT NOT NULL,
+    principalID INT NOT NULL,
+    title VARCHAR(180) NOT NULL,
+    periodStart DATE NOT NULL,
+    periodEnd DATE NOT NULL,
+    objectives TEXT NOT NULL,
+    outcomes TEXT NOT NULL,
+    attendanceSummary TEXT NOT NULL,
+    issues TEXT NULL,
+    recommendations TEXT NULL,
+    status ENUM('Submitted','Reviewed','Needs Revision') NOT NULL DEFAULT 'Submitted',
+    principalRemarks TEXT NULL,
+    submittedAt DATETIME NOT NULL,
+    reviewedAt DATETIME NULL,
+    INDEX idx_event_reports_principal (principalID,status,submittedAt),
+    INDEX idx_event_reports_teacher (submittedBy,submittedAt),
+    CONSTRAINT fk_event_reports_event FOREIGN KEY (eventID) REFERENCES events(eventID) ON DELETE SET NULL,
+    CONSTRAINT fk_event_reports_teacher FOREIGN KEY (submittedBy) REFERENCES users(userID) ON DELETE CASCADE,
+    CONSTRAINT fk_event_reports_principal FOREIGN KEY (principalID) REFERENCES users(userID) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

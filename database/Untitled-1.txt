@@ -1,0 +1,86 @@
+<?php
+session_start();
+require_once 'config/db.php';
+if (!isset($_SESSION['user']) || ($_SESSION['user']['role'] ?? '') !== 'Teacher') { header('Location: login.php'); exit; }
+$user = $_SESSION['user'];
+$userId = (int) $user['userID'];
+if (empty($_SESSION['csrf_token'])) { $_SESSION['csrf_token'] = bin2hex(random_bytes(32)); }
+$csrf = $_SESSION['csrf_token'];
+$message = '';
+$error = '';
+$events = [];
+$selectedEvent = null;
+$roster = [];
+function teacher_attendance_e($value): string { return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8'); }
+
+try {
+    $eventQuery = $pdo->prepare("SELECT eventID,eventName,eventDate,location FROM events WHERE createdBy=? AND status='Approved' ORDER BY eventDate DESC,eventName");
+    $eventQuery->execute([$userId]);
+    $events = $eventQuery->fetchAll(PDO::FETCH_ASSOC);
+
+    $eventID = (int) ($_POST['eventID'] ?? $_GET['eventID'] ?? 0);
+    if ($eventID > 0) {
+        $eventQuery = $pdo->prepare("SELECT eventID,eventName,eventDate,location FROM events WHERE eventID=? AND createdBy=? AND status='Approved' LIMIT 1");
+        $eventQuery->execute([$eventID, $userId]);
+        $selectedEvent = $eventQuery->fetch(PDO::FETCH_ASSOC) ?: null;
+        if (!$selectedEvent) { $error = 'This approved event could not be found in your account.'; }
+    }
+
+    if ($selectedEvent) {
+        $rosterQuery = $pdo->prepare("SELECT r.studentID,u.name AS studentName,s.class,a.status AS attendanceStatus FROM registrations r JOIN students s ON s.studentID=r.studentID JOIN users u ON u.userID=s.userID LEFT JOIN attendance a ON a.studentID=r.studentID AND a.eventID=r.eventID WHERE r.eventID=? AND r.status='Approved' ORDER BY u.name");
+        $rosterQuery->execute([$eventID]);
+        $roster = $rosterQuery->fetchAll(PDO::FETCH_ASSOC);
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_attendance']) && $error === '') {
+            if (!hash_equals($csrf, $_POST['csrf_token'] ?? '')) { throw new RuntimeException('Your form session expired. Refresh the page and try again.'); }
+            $attendance = $_POST['attendance'] ?? [];
+            if (!is_array($attendance) || !$attendance) { throw new RuntimeException('There are no student attendance records to save.'); }
+            $allowedStudents = array_fill_keys(array_column($roster, 'studentID'), true);
+            $save = $pdo->prepare("INSERT INTO attendance (studentID,eventID,attendanceDate,status) SELECT r.studentID,e.eventID,e.eventDate,? FROM registrations r JOIN events e ON e.eventID=r.eventID WHERE r.studentID=? AND r.eventID=? AND r.status='Approved' AND e.createdBy=? AND e.status='Approved' ON DUPLICATE KEY UPDATE attendanceDate=VALUES(attendanceDate),status=VALUES(status)");
+            $saved = 0;
+            $pdo->beginTransaction();
+            try {
+                foreach ($attendance as $studentID => $status) {
+                    if ($status === '') { continue; }
+                    if (!isset($allowedStudents[$studentID]) || !in_array($status, ['Present','Absent'], true)) { throw new RuntimeException('Invalid student or attendance status. Refresh and try again.'); }
+                    $save->execute([$status, (string) $studentID, $eventID, $userId]);
+                    if ($save->rowCount() > 0) { $saved++; }
+                }
+                if ($saved === 0) { throw new RuntimeException('Choose Present or Absent for at least one student.'); }
+                $pdo->commit();
+                $message = 'Attendance saved for ' . $saved . ' student record(s).';
+            } catch (Throwable $saveError) {
+                if ($pdo->inTransaction()) { $pdo->rollBack(); }
+                throw $saveError;
+            }
+            $rosterQuery->execute([$eventID]);
+            $roster = $rosterQuery->fetchAll(PDO::FETCH_ASSOC);
+        }
+    }
+} catch (Throwable $e) {
+    if ($pdo->inTransaction()) { $pdo->rollBack(); }
+    $error = $e instanceof RuntimeException ? $e->getMessage() : 'Attendance could not be loaded or saved. Check the database and try again.';
+}
+$present = count(array_filter($roster, static fn($row) => ($row['attendanceStatus'] ?? '') === 'Present'));
+$absent = count(array_filter($roster, static fn($row) => ($row['attendanceStatus'] ?? '') === 'Absent'));
+$marked = $present + $absent;
+?>
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Attendance | SEMS</title><link rel="stylesheet" href="assets/style.css"><link rel="stylesheet" href="assets/teacher.css"></head>
+<body class="teacher-dashboard"><div class="teacher-layout">
+<aside class="teacher-sidebar">
+<a href="teacher_dashboard.php" class="teacher-brand"><span class="teacher-brand-logo">S</span><span><strong>SEMS</strong><small>TEACHER PORTAL</small></span></a><p class="teacher-menu-label">MAIN MENU</p>
+<nav class="teacher-nav"><a class="teacher-nav-item" href="teacher_dashboard.php"><span>⌂</span> Dashboard</a><a class="teacher-nav-item" href="teacher_events.php"><span>▦</span> My Events</a><a class="teacher-nav-item" href="teacher_registrations.php"><span>▤</span> Registrations</a><a class="teacher-nav-item active" href="teacher_attendance.php"><span>✓</span> Attendance</a><a class="teacher-nav-item" href="teacher_profile.php"><span>◉</span> My Profile</a></nav>
+<div class="teacher-sidebar-bottom"><p>Record attendance for students approved for your events.</p><a href="logout.php">↪ &nbsp; Log Out</a></div></aside>
+<main class="teacher-main"><header class="teacher-topbar"><div><span class="teacher-eyebrow">STUDENT PARTICIPATION</span><h1>Attendance</h1></div><div class="teacher-account"><span class="teacher-avatar"><?= teacher_attendance_e(strtoupper(substr($user['name'],0,1))) ?></span><span><strong><?= teacher_attendance_e($user['name']) ?></strong><small>Teacher</small></span></div></header>
+<div class="teacher-content">
+<?php if ($message): ?><div class="teacher-success"><?= teacher_attendance_e($message) ?></div><?php endif; ?><?php if ($error): ?><div class="teacher-alert"><?= teacher_attendance_e($error) ?></div><?php endif; ?>
+<section class="teacher-panel"><div class="teacher-panel-heading"><div><h2>Choose an event</h2><p>Only your approved events and approved student registrations are included.</p></div></div>
+<form method="get" class="teacher-form"><label class="teacher-form-wide">Event<select name="eventID" required><option value="">Select an approved event</option><?php foreach ($events as $event): ?><option value="<?= (int) $event['eventID'] ?>" <?= $selectedEvent && (int)$selectedEvent['eventID']===(int)$event['eventID'] ? 'selected' : '' ?>><?= teacher_attendance_e($event['eventName']) ?> — <?= teacher_attendance_e(date('d M Y',strtotime($event['eventDate']))) ?></option><?php endforeach; ?></select></label><div class="teacher-form-wide teacher-form-actions"><button class="teacher-primary-button" type="submit">View attendance</button></div></form>
+<?php if (!$events): ?><div class="teacher-empty"><strong>No approved events yet</strong><p>Attendance will be available after the Principal approves one of your events.</p><a href="teacher_events.php">View my events</a></div><?php endif; ?></section>
+<?php if ($selectedEvent): ?>
+<section class="teacher-stats"><article class="teacher-stat"><span>Approved students</span><strong><?= count($roster) ?></strong><small>Event roster</small></article><article class="teacher-stat"><span>Present</span><strong><?= $present ?></strong><small>Attendance recorded</small></article><article class="teacher-stat"><span>Absent</span><strong><?= $absent ?></strong><small>Attendance recorded</small></article><article class="teacher-stat"><span>Not marked</span><strong><?= max(0,count($roster)-$marked) ?></strong><small>Awaiting attendance</small></article></section>
+<section class="teacher-panel"><div class="teacher-panel-heading"><div><h2><?= teacher_attendance_e($selectedEvent['eventName']) ?></h2><p><?= teacher_attendance_e(date('d M Y',strtotime($selectedEvent['eventDate']))) ?> · <?= teacher_attendance_e($selectedEvent['location']) ?> · Attendance is saved against the event date.</p></div></div>
+<?php if ($roster): ?><form method="post"><input type="hidden" name="csrf_token" value="<?= teacher_attendance_e($csrf) ?>"><input type="hidden" name="eventID" value="<?= (int)$selectedEvent['eventID'] ?>"><div class="teacher-table-wrap"><table class="teacher-table"><thead><tr><th>Student</th><th>Class</th><th>Attendance</th></tr></thead><tbody><?php foreach ($roster as $row): ?><tr><td><strong><?= teacher_attendance_e($row['studentName']) ?></strong><small class="teacher-cell-note"><?= teacher_attendance_e($row['studentID']) ?></small></td><td><?= teacher_attendance_e($row['class'] ?: 'Class not set') ?></td><td><select name="attendance[<?= teacher_attendance_e($row['studentID']) ?>]"><option value="" <?= empty($row['attendanceStatus']) ? 'selected' : '' ?>>Not marked</option><option value="Present" <?= ($row['attendanceStatus']??'')==='Present'?'selected':'' ?>>Present</option><option value="Absent" <?= ($row['attendanceStatus']??'')==='Absent'?'selected':'' ?>>Absent</option></select></td></tr><?php endforeach; ?></tbody></table></div><div class="teacher-form-actions" style="margin-top:18px"><button class="teacher-primary-button" type="submit" name="save_attendance" value="1">Save attendance</button></div></form><?php else: ?><div class="teacher-empty"><strong>No approved registrations</strong><p>Students approved for this event will appear here.</p><a href="teacher_registrations.php">View registrations</a></div><?php endif; ?></section>
+<?php endif; ?>
+<footer class="teacher-footer"><span>SEMS · School Event Management System</span><span>&copy; <?= date('Y') ?></span></footer></div></main></div></body></html>
